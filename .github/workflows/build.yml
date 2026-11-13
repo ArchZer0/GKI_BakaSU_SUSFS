@@ -1570,6 +1570,14 @@ jobs:
             fi
           fi
 
+      - name: Restore dedicated AdbHide Bazel cache
+        if: inputs.build_adbhide
+        uses: actions/cache/restore@v5
+        with:
+          path: /home/runner/.cache/bazel
+          key: adbhide-gki-android14-6.1.162-${{ github.sha }}
+          restore-keys: adbhide-gki-android14-6.1.162-
+
       # ==================== 编译普通内核 ====================
       # 使用重试机制编译普通内核，超时后自动重试
       - name: 构建普通内核
@@ -1653,7 +1661,22 @@ jobs:
           cd "$KERNEL_ROOT"
           git clone --depth 1 --branch v1.4.0 https://github.com/SampleBlazkness/AdbHide-Kernel.git adbhide-src
           # KernelSU's resolver binds non-exported symbols at load time.
-          sed -i '1i export KBUILD_MODPOST_WARN := 1' adbhide-src/kmod/Makefile
+          cat > adbhide-src/kmod/Makefile <<'MAKE'
+          export KBUILD_MODPOST_WARN := 1
+          ifneq ($(KERNELRELEASE),)
+          obj-m += adbhide_kmod.o
+          adbhide_kmod-y := adbhide_main.o adbhide_uids.o adbhide_probes.o adbhide_props.o
+          adbhide_kmod-y += adbhide_netseq.o adbhide_vma.o adbhide_sockets.o
+          else
+          .PHONY: all modules_install clean
+          all:
+          	$(MAKE) -C $(KERNEL_SRC) M=$(M) O=$(O) KBUILD_MODPOST_WARN=1 modules
+          modules_install:
+          	$(MAKE) -C $(KERNEL_SRC) M=$(M) O=$(O) modules_install
+          clean:
+          	$(MAKE) -C $(KERNEL_SRC) M=$(M) O=$(O) clean
+          endif
+          MAKE
           cat > adbhide-src/kmod/BUILD.bazel <<'BUILD'
           load("//build/kernel/kleaf:kernel.bzl", "kernel_module")
           kernel_module(
@@ -1661,12 +1684,29 @@ jobs:
               srcs = glob(["*.c", "*.h", "Makefile"]),
               outs = ["adbhide_kmod.ko"],
               kernel_build = "//common:kernel_aarch64",
+              generate_btf = True,
           )
           BUILD
           FRAG_FLAG=()
           if [ -s common/arch/arm64/configs/ksu.fragment ]; then
             FRAG_FLAG=(--defconfig_fragment=//common:arch/arm64/configs/ksu.fragment)
           fi
+          OUT="$GITHUB_WORKSPACE/adbhide-output"
+          mkdir -p "$OUT"
+          cp bazel-bin/common/kernel_aarch64/Module.symvers "$OUT/Module.symvers"
+          cp bazel-bin/common/kernel_aarch64/out-dir-kernel-headers.tar.gz "$OUT/"
+          cp bazel-bin/common/kernel_aarch64/include/config/kernel.release "$OUT/kernel.release"
+          if [ -f bazel-bin/common/kernel_aarch64/.config ]; then
+            cp bazel-bin/common/kernel_aarch64/.config "$OUT/kernel.config"
+          fi
+          OBJCOPY=$(find prebuilts/clang -path '*/bin/llvm-objcopy' -print -quit)
+          "$OBJCOPY" --dump-section .BTF="$OUT/kernel.btf" bazel-bin/common/kernel_aarch64/vmlinux
+          {
+            echo "kernel=$(git -C common rev-parse HEAD)"
+            echo "bakasu=$KSU_ACTUAL_REF"
+            echo "susfs=$(git -C "$SUSFS4KSU" rev-parse HEAD)"
+            echo "adbhide=$(git -C adbhide-src rev-parse HEAD)"
+          } > "$OUT/build-identity.txt"
           tools/bazel build --disk_cache=/home/runner/.cache/bazel --config=fast --lto=thin "${FRAG_FLAG[@]}" //adbhide-src/kmod:adbhide
           OUT="$GITHUB_WORKSPACE/adbhide-output"
           mkdir -p "$OUT/package"
@@ -1680,19 +1720,26 @@ jobs:
           {
             echo "kernel=$(git -C common rev-parse HEAD)"
             echo "bakasu=$KSU_ACTUAL_REF"
-            echo "susfs=$(git -C susfs4ksu rev-parse HEAD)"
+            echo "susfs=$(git -C "$SUSFS4KSU" rev-parse HEAD)"
             echo "adbhide=$(git -C adbhide-src rev-parse HEAD)"
             sha256sum "$OUT/adbhide_kmod.ko"
           } > "$OUT/build-identity.txt"
           (cd "$OUT/package" && zip -r "$OUT/AdbHide-kmod-BakaSU-android14-6.1.162.zip" .)
 
       - name: Upload AdbHide and ABI build materials
-        if: inputs.build_adbhide
+        if: always() && inputs.build_adbhide
         uses: actions/upload-artifact@v6
         with:
           name: AdbHide-BakaSU-android14-6.1.162
           path: adbhide-output/*
           if-no-files-found: error
+
+      - name: Save dedicated AdbHide Bazel cache
+        if: always() && inputs.build_adbhide
+        uses: actions/cache/save@v5
+        with:
+          path: /home/runner/.cache/bazel
+          key: adbhide-gki-android14-6.1.162-${{ github.sha }}
 
       # ==================== 准备内核 Image ====================
       # 复制编译产物到工作目录，供 AnyKernel3 打包使用
