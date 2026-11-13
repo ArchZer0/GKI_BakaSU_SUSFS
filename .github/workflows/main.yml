@@ -14,6 +14,7 @@ jobs:
       os_patch_level: '2026-03'
       ksu_variant: BakaSU
       ksu_branch: dc8e01e075ed1f6e1c7583ea8737ae79bd8237e5
+      version: '-ge187b75e04069-ab10015977-4k'
       build_time: Sun Dec 01 08:10:00 UTC 2024
       use_zram: false
       use_bbg: false
